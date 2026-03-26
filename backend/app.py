@@ -40,14 +40,29 @@ mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "mongodb://loc
 mongo_db_name = os.getenv("MONGO_DB", "url_shortener")
 mongo_collection_name = os.getenv("MONGO_COLLECTION", "urls")
 
-client = MongoClient(mongo_uri)
-db = client[mongo_db_name]
-collection = db[mongo_collection_name]
-# Compound unique index (user_id + original_url + expiry)
-collection.create_index(
-    [("user_id", 1), ("original_url", 1), ("expiry", 1)],
-    unique=True
-)
+client = None
+db = None
+collection = None
+
+try:
+    # Keep startup non-fatal on platforms like Render when DB is temporarily unavailable.
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+    client.admin.command("ping")
+    db = client[mongo_db_name]
+    collection = db[mongo_collection_name]
+    # Compound unique index (user_id + original_url + expiry)
+    collection.create_index(
+        [("user_id", 1), ("original_url", 1), ("expiry", 1)],
+        unique=True
+    )
+except Exception:
+    client = None
+    db = None
+    collection = None
+
+
+def _db_unavailable_response():
+    return jsonify({"error": "Database unavailable. Set a valid MONGO_URI and restart."}), 503
 
 
 def _iso(dt: datetime | None):
@@ -99,6 +114,9 @@ def base62_encode(num):
 @app.route('/shorten', methods=['POST'])
 @app.route('/api/shorten', methods=['POST'])
 def shorten_url():
+    if collection is None:
+        return _db_unavailable_response()
+
     data = request.get_json()
 
     # Simple rate limiting (per IP)
@@ -163,6 +181,9 @@ def shorten_url():
 @app.route('/stats/<short_code>', methods=['GET'])
 @app.route('/api/stats/<short_code>', methods=['GET'])
 def get_stats(short_code):
+    if collection is None:
+        return _db_unavailable_response()
+
     entry = collection.find_one({"short_code": short_code})
 
     if not entry:
@@ -178,6 +199,9 @@ def get_stats(short_code):
 
 @app.route('/api/urls', methods=['GET'])
 def list_urls():
+    if collection is None:
+        return _db_unavailable_response()
+
     # Hardcoded user_id for now (to match shorten endpoint)
     user_id = "user123"
     limit = min(int(request.args.get("limit", 100)), 500)
@@ -207,6 +231,9 @@ def list_urls():
 # API 2: Redirect
 @app.route('/<short_code>')
 def redirect_url(short_code):
+    if collection is None:
+        return _db_unavailable_response()
+
     
     # 🔥 Step 1: Check Redis
     entry = collection.find_one({"short_code": short_code})
