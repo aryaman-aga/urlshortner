@@ -17,6 +17,7 @@ except Exception:
 
 try:
     from flask_cors import CORS
+
 except Exception:
     CORS = None
 
@@ -24,12 +25,16 @@ except Exception:
 app = Flask(__name__)
 
 if CORS is not None:
-    CORS(app, resources={r"/api/*": {"origins": os.getenv("CORS_ORIGINS", "*")}})
+    CORS(app)
 
 redis_host = os.getenv("REDIS_HOST", "localhost")
 redis_port = int(os.getenv("REDIS_PORT", "6379"))
 redis_db = int(os.getenv("REDIS_DB", "0"))
-redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+try:
+    redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+    redis_client.ping()
+except Exception:
+    redis_client = None
 
 mongo_uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "mongodb://localhost:27017/"
 mongo_db_name = os.getenv("MONGO_DB", "url_shortener")
@@ -100,12 +105,13 @@ def shorten_url():
     user_ip = request.remote_addr
     key = f"rate_limit:{user_ip}"
 
-    requests_count = redis_client.get(key)
-    if requests_count and int(requests_count) > 5:
-        return jsonify({"error": "Too many requests"}), 429
+    if redis_client:
+        requests_count = redis_client.get(key)
+        if requests_count and int(requests_count) > 5:
+            return jsonify({"error": "Too many requests"}), 429
 
-    redis_client.incr(key)
-    redis_client.expire(key, 60)  # 1 minute window
+        redis_client.incr(key)
+        redis_client.expire(key, 60)  # 1 minute window
 
     original_url = data.get("url")
     custom_alias = data.get("custom_alias")
@@ -210,14 +216,15 @@ def redirect_url(short_code):
         return jsonify({"error": "Link expired"}), 410
 
 # Then Redis
-    cached_url = redis_client.get(short_code)
-    if cached_url:
-        # Increment clicks even on cache hit
-        collection.update_one(
-            {"short_code": short_code},
-            {"$inc": {"clicks": 1}}
-        )
-        return redirect(cached_url.decode('utf-8'))
+    if redis_client:
+        cached_url = redis_client.get(short_code)
+        if cached_url:
+            # Increment clicks even on cache hit
+            collection.update_one(
+                {"short_code": short_code},
+                {"$inc": {"clicks": 1}}
+            )
+            return redirect(cached_url.decode('utf-8'))
 
     # ❌ Cache miss → go to DB
 
@@ -225,7 +232,8 @@ def redirect_url(short_code):
         original_url = entry["original_url"]
 
         # Cache with TTL (1 hour)
-        redis_client.set(short_code, original_url, ex=3600)
+        if redis_client:
+            redis_client.set(short_code, original_url, ex=3600)
 
         # Increment clicks
         collection.update_one(
