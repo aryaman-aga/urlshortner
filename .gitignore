@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+.DS_Store
+node_modules/
+dist/
+*.tsbuildinfo
+.pytest_cache/
+.coverage
+.workspace/
+.git.broken

@@ -1,0 +1,101 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 220 20% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 10%;
+
+    --primary: 234 89% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 20% 10%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 10% 46%;
+
+    --accent: 234 89% 96%;
+    --accent-foreground: 234 89% 40%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 234 89% 60%;
+
+    --radius: 0.75rem;
+
+    --success: 160 84% 39%;
+    --success-foreground: 0 0% 100%;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 234 89% 60%;
+  }
+
+  .dark {
+    --background: 224 20% 6%;
+    --foreground: 210 20% 96%;
+    --card: 224 20% 9%;
+    --card-foreground: 210 20% 96%;
+    --popover: 224 20% 9%;
+    --popover-foreground: 210 20% 96%;
+    --primary: 234 89% 64%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 14% 14%;
+    --secondary-foreground: 210 20% 96%;
+    --muted: 220 14% 14%;
+    --muted-foreground: 220 10% 54%;
+    --accent: 234 50% 16%;
+    --accent-foreground: 234 89% 80%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 220 14% 16%;
+    --input: 220 14% 16%;
+    --ring: 234 89% 64%;
+    --success: 160 84% 39%;
+    --success-foreground: 0 0% 100%;
+    --sidebar-background: 224 20% 6%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 234 89% 64%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 14% 14%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 220 14% 16%;
+    --sidebar-ring: 234 89% 64%;
+  }
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
