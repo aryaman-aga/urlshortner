@@ -2,9 +2,12 @@ from flask import Flask, request, jsonify, redirect, send_from_directory
 import random
 import string
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 import redis
 from datetime import datetime, timedelta
 import os
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from werkzeug.security import generate_password_hash, check_password_hash
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -24,8 +27,24 @@ except Exception:
 
 app = Flask(__name__)
 
+def _parse_cors_origins(value: str):
+    value = (value or "").strip()
+    if not value or value == "*":
+        return "*"
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
 if CORS is not None:
-    CORS(app)
+    CORS(
+        app,
+        resources={r"/api/*": {"origins": _parse_cors_origins(os.getenv("CORS_ORIGINS", "*"))}},
+        allow_headers=["Content-Type", "Authorization"],
+    )
+
+
+AUTH_SECRET = os.getenv("AUTH_SECRET") or os.getenv("SECRET_KEY") or "dev-secret"
+AUTH_TOKEN_MAX_AGE_SECONDS = int(os.getenv("AUTH_TOKEN_MAX_AGE_SECONDS", "604800"))  # 7 days
+_token_serializer = URLSafeTimedSerializer(AUTH_SECRET, salt="sniplink-auth")
 
 redis_host = os.getenv("REDIS_HOST", "localhost")
 redis_port = int(os.getenv("REDIS_PORT", "6379"))
@@ -43,6 +62,7 @@ mongo_collection_name = os.getenv("MONGO_COLLECTION", "urls")
 client = None
 db = None
 collection = None
+users = None
 
 try:
     # Keep startup non-fatal on platforms like Render when DB is temporarily unavailable.
@@ -50,6 +70,7 @@ try:
     client.admin.command("ping")
     db = client[mongo_db_name]
     collection = db[mongo_collection_name]
+    users = db["users"]
     # Compound unique index (user_id + original_url + expiry)
     collection.create_index(
         [("user_id", 1), ("original_url", 1), ("expiry", 1)],
@@ -59,6 +80,7 @@ except Exception:
     client = None
     db = None
     collection = None
+    users = None
 
 
 def _db_unavailable_response():
@@ -94,6 +116,99 @@ def _public_base_url() -> str:
         return configured.rstrip("/")
     return request.host_url.rstrip("/")
 
+
+def _create_auth_token(username: str) -> str:
+    return _token_serializer.dumps({"u": username})
+
+
+def _verify_auth_token(token: str) -> str | None:
+    try:
+        data = _token_serializer.loads(token, max_age=AUTH_TOKEN_MAX_AGE_SECONDS)
+    except (SignatureExpired, BadSignature):
+        return None
+    except Exception:
+        return None
+
+    if isinstance(data, dict):
+        username = data.get("u")
+    else:
+        username = data
+
+    if not username:
+        return None
+    return str(username)
+
+
+def _current_username() -> str | None:
+    header = request.headers.get("Authorization", "")
+    if not header:
+        return None
+    parts = header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return _verify_auth_token(parts[1])
+
+
+def _require_auth_username():
+    username = _current_username()
+    if not username:
+        return None, (jsonify({"error": "Unauthorized"}), 401)
+    return username, None
+
+
+def _validate_username(username: str) -> str | None:
+    username = (username or "").strip()
+    if not username:
+        return None
+    if len(username) > 64:
+        return None
+    return username
+
+
+@app.route("/api/register", methods=["POST"])
+def register_user():
+    if users is None:
+        return _db_unavailable_response()
+
+    data = request.get_json(silent=True) or {}
+    username = _validate_username(data.get("username"))
+    password = (data.get("password") or "")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    password_hash = generate_password_hash(password)
+    try:
+        users.insert_one({"_id": username, "password_hash": password_hash})
+    except DuplicateKeyError:
+        return jsonify({"error": "Username already taken, choose another"}), 409
+    except Exception:
+        return jsonify({"error": "Failed to create account"}), 500
+
+    token = _create_auth_token(username)
+    return jsonify({"token": token, "username": username})
+
+
+@app.route("/api/login", methods=["POST"])
+def login_user():
+    if users is None:
+        return _db_unavailable_response()
+
+    data = request.get_json(silent=True) or {}
+    username = _validate_username(data.get("username"))
+    password = (data.get("password") or "")
+
+    if not username or not password:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    user = users.find_one({"_id": username})
+    password_hash = (user or {}).get("password_hash")
+    if not password_hash or not check_password_hash(password_hash, password):
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    token = _create_auth_token(username)
+    return jsonify({"token": token, "username": username})
+
 # Generate short code
 def generate_short_code(length=6):
     characters = string.ascii_letters + string.digits
@@ -117,6 +232,10 @@ def shorten_url():
     if collection is None:
         return _db_unavailable_response()
 
+    username, error_response = _require_auth_username()
+    if error_response:
+        return error_response
+
     data = request.get_json()
 
     # Simple rate limiting (per IP)
@@ -137,8 +256,7 @@ def shorten_url():
     if not original_url:
         return jsonify({"error": "URL is required"}), 400
 
-    # Hardcoded user_id (for now)
-    user_id = "user123"
+    user_id = username
     expiry = _parse_expiry(data.get("expiry"))
 
     # Optional expiry (1 day)
@@ -202,8 +320,11 @@ def list_urls():
     if collection is None:
         return _db_unavailable_response()
 
-    # Hardcoded user_id for now (to match shorten endpoint)
-    user_id = "user123"
+    username, error_response = _require_auth_username()
+    if error_response:
+        return error_response
+
+    user_id = username
     limit = min(int(request.args.get("limit", 100)), 500)
     skip = max(int(request.args.get("skip", 0)), 0)
 
@@ -275,6 +396,8 @@ def redirect_url(short_code):
 
 
 @app.route('/', methods=['GET'])
+@app.route('/login', methods=['GET'])
+@app.route('/register', methods=['GET'])
 def serve_frontend_root():
     dist_index = os.path.join(PROJECT_ROOT, "dist", "index.html")
     if os.path.exists(dist_index):

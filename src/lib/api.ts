@@ -1,10 +1,29 @@
 import axios from "axios";
+import { getAuthToken } from "@/lib/auth";
 
 const baseURL = import.meta.env.VITE_API_BASE_URL ?? "";
 
 const API = axios.create({
   baseURL,
 });
+
+API.interceptors.request.use((config) => {
+  const token = getAuthToken();
+  if (token) {
+    (config.headers as any)["Authorization"] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+export interface AuthRequest {
+  username: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  token: string;
+  username: string;
+}
 
 export interface ShortenRequest {
   url: string;
@@ -39,6 +58,16 @@ export interface UrlsListResponse {
 
 export const shortenUrl = async (data: ShortenRequest) => {
   const response = await API.post("/api/shorten", data);
+  return response.data;
+};
+
+export const registerUser = async (data: AuthRequest) => {
+  const response = await API.post<AuthResponse>("/api/register", data);
+  return response.data;
+};
+
+export const loginUser = async (data: AuthRequest) => {
+  const response = await API.post<AuthResponse>("/api/login", data);
   return response.data;
 };
 

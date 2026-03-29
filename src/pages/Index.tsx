@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Scissors } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -8,11 +9,18 @@ import StatsCard from "@/components/StatsCard";
 import { listUrls, ShortenResponse, type UrlItem } from "@/lib/api";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { clearAuth } from "@/lib/auth";
 
 const Index = () => {
+  const navigate = useNavigate();
   const [result, setResult] = useState<ShortenResponse | null>(null);
   const [urls, setUrls] = useState<UrlItem[]>([]);
   const [urlsLoading, setUrlsLoading] = useState(false);
+
+  const handleLogout = () => {
+    clearAuth();
+    navigate("/login", { replace: true });
+  };
 
   const loadUrls = async () => {
     setUrlsLoading(true);
@@ -35,7 +43,12 @@ const Index = () => {
             </div>
             <span className="text-lg font-bold tracking-tight">Sniplink</span>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <Button variant="ghost" size="sm" onClick={handleLogout}>
+              Logout
+            </Button>
+          </div>
         </div>
       </header>
 
