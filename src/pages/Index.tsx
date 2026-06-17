@@ -25,6 +25,7 @@ const Index = () => {
 
   const [editingItem, setEditingItem] = useState<UrlItem | null>(null);
   const [editUrl, setEditUrl] = useState("");
+  const [editAlias, setEditAlias] = useState("");
   const [editExpiry, setEditExpiry] = useState("");
   const [editSaving, setEditSaving] = useState(false);
 
@@ -55,6 +56,7 @@ const Index = () => {
   const openEdit = (item: UrlItem) => {
     setEditingItem(item);
     setEditUrl(item.original_url);
+    setEditAlias(item.short_code);
     setEditExpiry(item.expiry ?? "");
     setEditOpen(true);
   };
@@ -63,11 +65,11 @@ const Index = () => {
     if (!editingItem) return;
     if (!editUrl.trim()) return;
 
-    if (!editingItem) return;
     setEditSaving(true);
     try {
       await updateUrl(editingItem.short_code, {
         url: editUrl.trim(),
+        custom_alias: editAlias.trim() || undefined,
         expiry: editExpiry || null,
       });
       toast({ title: "Updated", description: "Link updated successfully." });
@@ -221,6 +223,10 @@ const Index = () => {
                               <div className="space-y-2">
                                 <Label htmlFor="edit-url">URL</Label>
                                 <Input id="edit-url" value={editUrl} onChange={(e) => setEditUrl(e.target.value)} placeholder="https://example.com" />
+                              </div>
+                              <div className="space-y-2">
+                                <Label htmlFor="edit-alias">Short link</Label>
+                                <Input id="edit-alias" value={editAlias} onChange={(e) => setEditAlias(e.target.value)} placeholder="my-link" />
                               </div>
                               <div className="space-y-2">
                                 <Label htmlFor="edit-expiry">Expiry (optional)</Label>
