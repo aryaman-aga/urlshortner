@@ -80,3 +80,19 @@ export const listUrls = async (params?: { limit?: number; skip?: number }) => {
   const response = await API.get<UrlsListResponse>("/api/urls", { params });
   return response.data;
 };
+
+export interface UpdateUrlRequest {
+  url?: string;
+  custom_alias?: string;
+  expiry?: string | null;
+}
+
+export const updateUrl = async (shortCode: string, data: UpdateUrlRequest) => {
+  const response = await API.put(`/api/urls/${shortCode}`, data);
+  return response.data;
+};
+
+export const deleteUrl = async (shortCode: string) => {
+  const response = await API.delete(`/api/urls/${shortCode}`);
+  return response.data;
+};

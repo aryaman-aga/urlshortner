@@ -349,6 +349,67 @@ def list_urls():
     return jsonify({"items": items, "limit": limit, "skip": skip})
 
 
+@app.route('/api/urls/<short_code>', methods=['PUT'])
+def update_url(short_code):
+    if collection is None:
+        return _db_unavailable_response()
+
+    username, error_response = _require_auth_username()
+    if error_response:
+        return error_response
+
+    data = request.get_json(silent=True) or {}
+    existing = collection.find_one({"short_code": short_code, "user_id": username})
+
+    if not existing:
+        return jsonify({"error": "URL not found"}), 404
+
+    update_fields = {}
+    if "url" in data:
+        update_fields["original_url"] = data["url"]
+    if "expiry" in data:
+        update_fields["expiry"] = _parse_expiry(data.get("expiry"))
+    if "custom_alias" in data and data["custom_alias"]:
+        new_alias = data["custom_alias"]
+        if collection.find_one({"short_code": new_alias, "_id": {"$ne": existing["_id"]}}):
+            return jsonify({"error": "Custom alias already taken"}), 400
+        update_fields["short_code"] = new_alias
+        if redis_client:
+            redis_client.delete(short_code)
+
+    if not update_fields:
+        return jsonify({"error": "No fields to update"}), 400
+
+    collection.update_one({"short_code": short_code, "user_id": username}, {"$set": update_fields})
+
+    if redis_client:
+        redis_client.delete(short_code)
+
+    base = _public_base_url()
+    new_short_code = update_fields.get("short_code", short_code)
+    return jsonify({"short_url": f"{base}/{new_short_code}"})
+
+
+@app.route('/api/urls/<short_code>', methods=['DELETE'])
+def delete_url(short_code):
+    if collection is None:
+        return _db_unavailable_response()
+
+    username, error_response = _require_auth_username()
+    if error_response:
+        return error_response
+
+    result = collection.delete_one({"short_code": short_code, "user_id": username})
+
+    if result.deleted_count == 0:
+        return jsonify({"error": "URL not found"}), 404
+
+    if redis_client:
+        redis_client.delete(short_code)
+
+    return jsonify({"message": "Deleted"}), 200
+
+
 # API 2: Redirect
 @app.route('/<short_code>')
 def redirect_url(short_code):
