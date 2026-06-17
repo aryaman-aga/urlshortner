@@ -67,12 +67,14 @@ const Admin = () => {
       const data = await getAdminStats();
       setStats(data);
     } catch (err: any) {
+      console.error("Admin stats error:", err);
       if (err.response?.status === 401) {
         clearAuth();
         navigate("/login", { replace: true });
         return;
       }
-      setError(err.response?.data?.error || "Failed to load stats");
+      const detail = err.response?.data?.error || err.message || "Failed to load stats";
+      setError(detail);
     } finally {
       setLoading(false);
     }
@@ -134,10 +136,12 @@ const Admin = () => {
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
         {error && (
-          <div className="flex flex-col items-center justify-center h-full text-center">
+          <div className="flex flex-col items-center justify-center h-full text-center max-w-md mx-auto">
             <Cpu className="h-12 w-12 text-destructive/50 mb-4" />
-            <p className="text-lg font-semibold text-destructive">Error</p>
-            <p className="text-sm text-muted-foreground mt-1 mb-4">{error}</p>
+            <p className="text-lg font-semibold text-destructive">Error: {error}</p>
+            <p className="text-xs text-muted-foreground mt-2 mb-4 font-mono break-all">
+              Check the browser console (F12) for details.
+            </p>
             <Button onClick={fetchStats} variant="outline">
               <RefreshCw className="h-4 w-4 mr-1.5" />
               Retry

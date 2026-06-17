@@ -508,21 +508,34 @@ def admin_stats():
     if not username:
         return jsonify({"error": "Unauthorized"}), 401
 
+    urls_total = 0
+    urls_expired = 0
+    users_total = 0
     try:
-        urls_total = collection.count_documents({})
-        urls_expired = collection.count_documents({"expiry": {"$lt": datetime.utcnow()}}) if urls_total else 0
-        users_total = users.count_documents({}) if users else 0
+        urls_total = len(list(collection.find({}, {"_id": 1}).limit(10000)))
+        if urls_total == 10000:
+            urls_total = collection.estimated_document_count()
+    except Exception as e:
+        app.logger.warning("admin_stats count failed: %s %s", type(e).__name__, str(e)[:200])
+    try:
+        if urls_total:
+            expired = list(collection.find({"expiry": {"$lt": datetime.utcnow()}}, {"_id": 1}).limit(10000))
+            urls_expired = len(expired)
     except Exception:
-        return jsonify({"error": "Failed to query database"}), 503
+        pass
+    try:
+        users_total = len(list(users.find({}, {"_id": 1}).limit(10000))) if users else 0
+    except Exception:
+        pass
 
     clicks_total = 0
     top_urls = []
     try:
-        clicks_pipe = list(collection.aggregate([
-            {"$group": {"_id": None, "total": {"$sum": "$clicks"}}}
-        ]))
-        clicks_total = clicks_pipe[0]["total"] if clicks_pipe else 0
-
+        for doc in collection.find({}, {"clicks": 1, "_id": 0}):
+            clicks_total += doc.get("clicks", 0) or 0
+    except Exception:
+        pass
+    try:
         top_urls = list(collection.find(
             {},
             {"short_code": 1, "original_url": 1, "clicks": 1, "created_at": 1, "_id": 0}
