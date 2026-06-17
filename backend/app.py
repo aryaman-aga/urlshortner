@@ -479,6 +479,35 @@ def redirect_url(short_code):
         return jsonify({"error": "URL not found"}), 404
 
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    status = "healthy"
+    checks = {}
+
+    try:
+        client.admin.command("ping")
+        checks["mongodb"] = "up"
+    except Exception:
+        checks["mongodb"] = "down"
+        status = "degraded"
+
+    if redis_client:
+        try:
+            redis_client.ping()
+            checks["redis"] = "up"
+        except Exception:
+            checks["redis"] = "down"
+            status = "degraded"
+    else:
+        checks["redis"] = "disabled"
+
+    http_code = 200 if status == "healthy" else 503
+    return jsonify({
+        "status": status,
+        "checks": checks,
+    }), http_code
+
+
 @app.route('/api', methods=['GET'])
 def api_docs():
     return jsonify({
