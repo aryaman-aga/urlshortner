@@ -356,7 +356,7 @@ def redirect_url(short_code):
         return _db_unavailable_response()
 
     
-    # 🔥 Step 1: Check Redis
+    # Step 1: Check Redis cache
     entry = collection.find_one({"short_code": short_code})
 
 # Expiry check first
@@ -374,7 +374,7 @@ def redirect_url(short_code):
             )
             return redirect(cached_url.decode('utf-8'))
 
-    # ❌ Cache miss → go to DB
+    # Cache miss — fall back to DB
 
     if entry:
         original_url = entry["original_url"]
