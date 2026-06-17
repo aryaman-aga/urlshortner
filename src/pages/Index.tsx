@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Scissors, LogOut, RefreshCw, BarChart3, ExternalLink, Zap,
-  Pencil, Trash2, Loader2, Server,
+  Pencil, Trash2, Loader2,
 } from "lucide-react";
 import ThemeToggle from "@/components/ThemeToggle";
 import ShortenForm from "@/components/ShortenForm";
@@ -113,10 +113,6 @@ const Index = () => {
           </div>
           <div className="flex items-center gap-1">
             <ThemeToggle />
-            <Button variant="ghost" size="sm" onClick={() => navigate("/aa/admin")} className="text-muted-foreground hover:text-foreground">
-              <Server className="h-4 w-4 mr-1.5" />
-              <span className="hidden sm:inline">Admin</span>
-            </Button>
             <Button variant="ghost" size="sm" onClick={handleLogout} className="text-muted-foreground hover:text-foreground">
               <LogOut className="h-4 w-4 mr-1.5" />
               <span className="hidden sm:inline">Logout</span>

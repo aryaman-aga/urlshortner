@@ -508,21 +508,43 @@ def admin_stats():
     if not username:
         return jsonify({"error": "Unauthorized"}), 401
 
-    urls_total = collection.count_documents({})
-    urls_expired = collection.count_documents({"expiry": {"$lt": datetime.utcnow()}}) if urls_total else 0
-    users_total = users.count_documents({}) if users else 0
+    try:
+        urls_total = collection.count_documents({})
+        urls_expired = collection.count_documents({"expiry": {"$lt": datetime.utcnow()}}) if urls_total else 0
+        users_total = users.count_documents({}) if users else 0
+    except Exception:
+        return jsonify({"error": "Failed to query database"}), 503
 
-    clicks_pipe = list(collection.aggregate([
-        {"$group": {"_id": None, "total": {"$sum": "$clicks"}}}
-    ]))
-    clicks_total = clicks_pipe[0]["total"] if clicks_pipe else 0
+    clicks_total = 0
+    top_urls = []
+    try:
+        clicks_pipe = list(collection.aggregate([
+            {"$group": {"_id": None, "total": {"$sum": "$clicks"}}}
+        ]))
+        clicks_total = clicks_pipe[0]["total"] if clicks_pipe else 0
 
-    top_urls = list(collection.find(
-        {},
-        {"short_code": 1, "original_url": 1, "clicks": 1, "created_at": 1, "_id": 0}
-    ).sort("clicks", -1).limit(10))
+        top_urls = list(collection.find(
+            {},
+            {"short_code": 1, "original_url": 1, "clicks": 1, "created_at": 1, "_id": 0}
+        ).sort("clicks", -1).limit(10))
+    except Exception:
+        pass
 
-    db_stats = db.command("dbstats")
+    db_info = None
+    try:
+        db_stats = db.command("dbstats")
+        db_info = {
+            "size_mb": round(db_stats.get("dataSize", 0) / (1024 * 1024), 2),
+            "collections": db_stats.get("collections", 0),
+            "objects": db_stats.get("objects", 0),
+            "avg_object_size_bytes": round(db_stats.get("avgObjSize", 0)),
+            "index_size_mb": round(db_stats.get("totalIndexSize", 0) / (1024 * 1024), 2),
+        }
+    except Exception:
+        db_info = {
+            "size_mb": 0, "collections": 0, "objects": 0,
+            "avg_object_size_bytes": 0, "index_size_mb": 0,
+        }
 
     redis_data = {}
     if redis_client:
@@ -554,13 +576,7 @@ def admin_stats():
             "expired": urls_expired,
         },
         "users": {"total": users_total},
-        "database": {
-            "size_mb": round(db_stats.get("dataSize", 0) / (1024 * 1024), 2),
-            "collections": db_stats.get("collections", 0),
-            "objects": db_stats.get("objects", 0),
-            "avg_object_size_bytes": round(db_stats.get("avgObjSize", 0)),
-            "index_size_mb": round(db_stats.get("totalIndexSize", 0) / (1024 * 1024), 2),
-        },
+        "database": db_info,
         "redis": redis_data,
         "top_urls": [
             {
