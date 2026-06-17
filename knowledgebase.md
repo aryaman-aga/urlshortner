@@ -90,7 +90,7 @@
 
 ## 4. Backend Deep Dive
 
-### 4.1 File: `backend/app.py` (422 lines)
+### 4.1 File: `backend/app.py` (592 lines)
 
 #### Auth System
 - **Token:** URLSafeTimedSerializer (itsdangerous) — not standard JWT, but a signed timed token
@@ -100,22 +100,30 @@
 
 #### Endpoints
 
-| Method | Route | Auth | Description |
-|---|---|---|---|
-| POST | `/api/register` | No | Create account, returns token |
-| POST | `/api/login` | No | Login, returns token |
-| POST | `/api/shorten` | Yes (Bearer) | Create short URL |
-| GET | `/api/urls` | Yes (Bearer) | List user's URLs (paginated) |
-| GET | `/api/stats/<code>` | No | Get click stats for a short code |
-| GET | `/<short_code>` | No | Redirect to original URL |
-| GET | `/`, `/login`, `/register` | No | Serve frontend or API info |
-| GET | `/assets/<path>` | No | Serve built frontend assets |
+| Method | Route | Auth | Rate-Limited | Description |
+|---|---|---|---|---|
+| GET | `/api` | No | No | API documentation / endpoint listing |
+| POST | `/api/register` | No | Yes (10/min/IP) | Create account, returns token |
+| POST | `/api/login` | No | Yes (10/min/IP) | Login, returns token |
+| POST | `/api/shorten` | Yes (Bearer) | Yes (5/min/IP) | Create short URL |
+| GET | `/api/urls` | Yes (Bearer) | No | List user's URLs (paginated) |
+| PUT | `/api/urls/<code>` | Yes (Bearer) | No | Update URL, alias, or expiry |
+| DELETE | `/api/urls/<code>` | Yes (Bearer) | No | Delete a short URL |
+| GET | `/api/stats/<code>` | No | No | Get click stats for a short code |
+| GET | `/<short_code>` | No | No | Redirect to original URL |
+| GET | `/`, `/login`, `/register` | No | No | Serve frontend or API info |
+| GET | `/assets/<path>` | No | No | Serve built frontend assets |
 
 #### Rate Limiting (Redis)
-- Key: `rate_limit:{user_ip}`
-- Window: 60 seconds
-- Limit: 5 requests per window
-- Implemented only on `/api/shorten`
+Rate limiting is applied to creation and auth endpoints to prevent abuse:
+
+| Endpoint | Key Prefix | Limit | Window | Scope |
+|---|---|---|---|---|
+| `/api/shorten` | `rate_limit:{ip}` | 5 requests | 60 seconds | Per IP |
+| `/api/register` | `rate_limit_auth:{ip}` | 10 requests | 60 seconds | Per IP |
+| `/api/login` | `rate_limit_auth:{ip}` | 10 requests | 60 seconds | Per IP |
+
+All rate limits gracefully degrade if Redis is unavailable (checks `redis_client` before every operation).
 
 #### Caching (Redis)
 - On redirect, check Redis cache first
@@ -184,13 +192,15 @@ Sample document structure for export/backup:
 ### 5.2 Pages
 
 #### `Index.tsx` — Main Dashboard
+- Two-column grid layout: left panel (shorten form + analytics), right panel (links list)
 - Header with logo ("Sniplink"), ThemeToggle, Logout button
 - URL shortener form (`ShortenForm`)
 - Result display with QR code (`ResultCard`)
 - Link analytics lookup (`StatsCard`)
-- "My Links" table listing all user's URLs (fetched from `GET /api/urls`)
-- Table columns: Short Code, Original URL, Clicks, Expiry
-- Manual "Refresh" button (no auto-refetch)
+- "My Links" list showing all user's URLs with edit (pencil) and delete (trash) action buttons on hover
+- Edit opens a Dialog with URL, short code alias, and expiry fields
+- Delete shows an AlertDialog confirmation before removing
+- Auto-fetches links on mount via `useEffect` + manual "Refresh" button
 
 #### `Login.tsx`
 - Username + password form
@@ -249,8 +259,8 @@ Sample document structure for export/backup:
 #### `api.ts`
 - Axios instance with `VITE_API_BASE_URL` base
 - Request interceptor: auto-attaches `Bearer` token from localStorage
-- Typed interfaces: `AuthRequest`, `AuthResponse`, `ShortenRequest`, `ShortenResponse`, `StatsResponse`, `UrlItem`, `UrlsListResponse`
-- Functions: `shortenUrl()`, `registerUser()`, `loginUser()`, `getStats()`, `listUrls()`
+- Typed interfaces: `AuthRequest`, `AuthResponse`, `ShortenRequest`, `ShortenResponse`, `UpdateUrlRequest`, `StatsResponse`, `UrlItem`, `UrlsListResponse`
+- Functions: `shortenUrl()`, `registerUser()`, `loginUser()`, `getStats()`, `listUrls()`, `updateUrl()`, `deleteUrl()`
 
 #### `auth.ts`
 - `TOKEN_KEY = "sniplink_token"`, `USERNAME_KEY = "sniplink_username"`
@@ -279,11 +289,11 @@ Sample document structure for export/backup:
 - `index.css` — CSS variables (HSL) for light & dark themes
 - Theme: Indigo primary (`234 89% 60%`), slate-based neutrals
 - `border-radius: 0.75rem` (12px)
-- Font: Inter via Google Fonts
+- Font: JetBrains Mono (coding/monospace font via Google Fonts), with fallback chain: Fira Code, Cascadia Code, Consolas, monospace
 
 ---
 
-## 6. Database Schema
+## 6. Database Schema & Indexing Strategy
 
 ### MongoDB — `url_shortener` database
 
@@ -298,8 +308,21 @@ Sample document structure for export/backup:
   clicks: Number (default 0)
 }
 ```
-- Compound unique index: `(user_id, original_url, expiry)`
-- Sorted by `clicks` descending on list
+
+**Indexes (created on startup):**
+
+| Index | Type | Purpose |
+|---|---|---|
+| `(user_id, original_url, expiry)` | Compound unique | Prevents duplicate URL entries per user per expiry window |
+| `short_code` | Unique | Fast O(1) lookups for redirects and stats queries |
+| `(user_id, clicks)` | Compound descending | Optimizes the "My Links" page which sorts by clicks descending |
+| `user_id` | Single | Fast filtering when listing a user's URLs |
+
+**Indexing rationale:**
+- `short_code` is the most performance-critical index — every redirect and stats query does an exact match on this field. The unique constraint also prevents collision bugs.
+- The compound unique index `(user_id, original_url, expiry)` enforces business-level deduplication at the database layer, preventing race conditions.
+- `(user_id, clicks)` supports the paginated sorted list endpoint without in-memory sorting, important as the user's link count grows.
+- Separate `user_id` index covers the case where `clicks` sort is not needed, allowing MongoDB to use an index-only scan.
 
 #### Collection: `users`
 ```
@@ -308,11 +331,12 @@ Sample document structure for export/backup:
   password_hash: String (Werkzeug hash)
 }
 ```
-- Simple key-value pattern using `_id` as username
+- Simple key-value pattern using `_id` as username (implicit unique index on `_id`)
 
 ### Redis
-- Cache: `{short_code} → {original_url}` (TTL: 3600s)
-- Rate limit: `rate_limit:{ip} → {count}` (TTL: 60s)
+- **Cache:** `{short_code} → {original_url}` (TTL: 3600s) — reduces MongoDB read load on redirects
+- **Rate limit (shorten):** `rate_limit:{ip} → {count}` (TTL: 60s)
+- **Rate limit (auth):** `rate_limit_auth:{ip} → {count}` (TTL: 60s)
 
 ---
 
@@ -416,13 +440,12 @@ npm run dev
 
 ## 11. Known Gaps & Notes
 
-- No rate limiting on auth endpoints (only on `/api/shorten`)
 - Token is not a standard JWT (itsdangerous signed dict)
 - No password strength validation
 - No URL validation beyond HTML5 `type=url`
 - No HTTPS enforcement in code (handled by deployment)
 - CORS is wide-open (`*`) by default
-- "My Links" table requires manual "Refresh" click (no auto-polling or React Query cache invalidation)
+- "My Links" auto-fetches on mount but lacks real-time updates — could use WebSockets or polling for multi-user scenarios
 - Recharts is available in dependencies but not yet used
 - No CSRF protection (token-based auth mitigates this)
 - clicks counter is not atomic-safe under concurrent requests in current implementation (no findOneAndUpdate)
@@ -456,7 +479,7 @@ npm run dev
 
 11. **How are passwords stored?** — Passwords are hashed using Werkzeug's `generate_password_hash()` which uses PBKDF2 with a SHA-256 salt by default. Verification uses `check_password_hash()` which extracts the salt from the stored hash and re-computes.
 
-12. **What indexes exist on the urls collection?** — A compound unique index on `(user_id, original_url, expiry)`. There is no explicit index on `short_code` or `user_id` alone (implicit due to unique constraint searches in queries).
+12. **What indexes exist on the urls collection and why?** — Four indexes: (1) compound unique `(user_id, original_url, expiry)` for deduplication, (2) unique `short_code` for fast redirect lookups, (3) compound `(user_id, clicks DESC)` for the sorted list endpoint, (4) `user_id` for filtering. The short_code index is the most performance-critical — every redirect does an exact match on it.
 
 13. **Why does the clicks counter increment even on Redis cache hits?** — Click accuracy is important for analytics. Even if the redirect is served from cache, we still update MongoDB with `$inc: {clicks: 1}` to ensure the counter reflects all visits.
 
@@ -494,7 +517,7 @@ npm run dev
 
 29. **How would you add password reset functionality?** — Add a `POST /api/forgot-password` that generates a timed token (similar to auth token) linked to the user, sends it via email (SendGrid, SES), and a `POST /api/reset-password` that verifies the token and updates the password hash. The frontend would have a ForgotPassword page collecting email.
 
-30. **What security considerations are missing?** — Rate limiting on auth endpoints (prevent brute force), HTTPS enforcement, input sanitization beyond werkzeug, CSRF protection (partially mitigated by token auth), password strength requirements, no refresh token rotation, no email verification, logs may expose IPs and user data.
+30. **What security considerations are missing?** — HTTPS enforcement, input sanitization beyond werkzeug, CSRF protection (partially mitigated by token auth), password strength requirements, no refresh token rotation, no email verification, logs may expose IPs and user data.
 
 ### Revisit/Review Prompts
 31. **How would you refactor the backend to use async/await?** — Switch from Flask to Quart (async Flask-compatible) or FastAPI. Use `asyncpg` or `motor` (async MongoDB driver). Use `aioredis` for Redis. This would improve throughput for I/O-bound operations like DB queries and cache lookups.
@@ -502,3 +525,27 @@ npm run dev
 32. **How does the Vite proxy work in development?** — `vite.config.ts` defines a proxy rule: any request to `/api` is forwarded to the backend target (default `http://127.0.0.1:5000`) with `changeOrigin: true`. This avoids CORS issues during development since the browser sees everything coming from the same origin.
 
 33. **Why is there a `base62_encode` function that's never used?** — It's a planned upgrade path. Random generation works for current scale, but base62 encoding from a monotonically increasing counter would produce shorter codes, avoid collision loops, and be more scalable. The function was written in advance for this future optimization.
+
+### Additions (API Docs, Indexing, Rate Limiting, Edit/Delete)
+
+34. **How does the `GET /api` documentation endpoint work and why did you add it?** — It returns a JSON object listing every endpoint with its method, auth requirement, rate limit status, request/response schema, and possible error codes. It serves as self-documenting API reference that stays in sync with the code, eliminating the need for a separate Swagger setup.
+
+35. **Why did you choose a self-documenting JSON endpoint over OpenAPI/Swagger?** — For a small API with 8 endpoints, a hand-written JSON response is simpler, requires zero additional dependencies, stays perfectly in sync with the code, and is easily consumed by both humans and automated tools. Swagger would be over-engineered for this scope.
+
+36. **Explain the database indexing strategy — why did you add a separate `short_code` unique index?** — The redirect endpoint (`GET /<short_code>`) is the most performance-critical path: every visit does an exact lookup on `short_code`. Without an explicit index, MongoDB would need a full collection scan. The unique constraint also acts as a safety net against accidental code collisions.
+
+37. **Why add a compound index on `(user_id, clicks)` rather than just on `user_id`?** — The `list_urls` endpoint sorts results by `clicks DESC`. With a compound index `(user_id, clicks DESC)`, MongoDB can satisfy both the filter and the sort from the same index without an in-memory sort, which is critical as the user's link count grows into thousands.
+
+38. **How did you add rate limiting to auth endpoints and why is it important?** — Added a reusable `_check_rate_limit()` function that uses Redis `INCR` + `EXPIRE`. Auth endpoints (`/api/register`, `/api/login`) now have 10 requests/minute/IP limit. Without this, an attacker could brute-force passwords or spam account creation with unlimited requests.
+
+39. **The shorten endpoint has 5 req/min while auth has 10 req/min — why the difference?** — Auth endpoints need a higher limit because legitimate users may mistype a password a few times. The shorten endpoint has a tighter limit because each request creates a persistent record (short URL), and the damage from abuse (spam links) is higher than a few failed login attempts.
+
+40. **How does the edit/delete flow work end-to-end?** — Frontend sends a PUT or DELETE request to `/api/urls/<short_code>` with an auth header. The backend verifies ownership (checks `user_id` matches the authenticated user), performs the update or deletion in MongoDB, and invalidates the Redis cache for that short_code. The frontend refreshes the list via `loadUrls()`.
+
+41. **What happens to cached redirects when a URL is updated or deleted?** — Both PUT and DELETE endpoints explicitly delete the Redis cache key for the short_code. On the next redirect, Redis will miss and the endpoint will fetch the fresh state from MongoDB (or return 404 if deleted). This ensures cache never serves stale or deleted URLs.
+
+42. **How does the `_check_rate_limit` function handle Redis being down?** — It checks `if redis_client:` before every operation. If Redis is unavailable (e.g. `redis_client` is `None` due to connection failure at startup), the rate limiter is a no-op — requests pass through without rate counting. This provides graceful degradation.
+
+43. **How would you implement URL validation before shortening?** — Add a step in `shorten_url()` that validates the URL against a blocklist (phishing domains), checks for malformed URLs beyond HTML5 `type=url`, and optionally verifies the domain resolves via a DNS lookup. The backend should validate in addition to frontend validation.
+
+44. **What's the tradeoff between the dedup compound index and allowing duplicate URLs?** — The compound index prevents the same user from creating multiple short URLs pointing to the same destination, which saves storage and avoids confusion. The tradeoff is flexibility — a user might legitimately want multiple short codes for the same URL (e.g. for different campaigns). The current design prioritizes simplicity and storage efficiency.

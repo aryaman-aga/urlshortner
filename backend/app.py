@@ -71,11 +71,14 @@ try:
     db = client[mongo_db_name]
     collection = db[mongo_collection_name]
     users = db["users"]
-    # Compound unique index (user_id + original_url + expiry)
+    # Indexes for query performance
     collection.create_index(
         [("user_id", 1), ("original_url", 1), ("expiry", 1)],
         unique=True
     )
+    collection.create_index("short_code", unique=True)
+    collection.create_index([("user_id", 1), ("clicks", -1)])
+    collection.create_index("user_id")
 except Exception:
     client = None
     db = None
@@ -156,6 +159,18 @@ def _require_auth_username():
     return username, None
 
 
+def _check_rate_limit(prefix: str = "rate_limit", max_requests: int = 10, window: int = 60):
+    user_ip = request.remote_addr
+    key = f"{prefix}:{user_ip}"
+    if redis_client:
+        count = redis_client.get(key)
+        if count and int(count) > max_requests:
+            return jsonify({"error": "Too many requests"}), 429
+        redis_client.incr(key)
+        redis_client.expire(key, window)
+    return None
+
+
 def _validate_username(username: str) -> str | None:
     username = (username or "").strip()
     if not username:
@@ -169,6 +184,10 @@ def _validate_username(username: str) -> str | None:
 def register_user():
     if users is None:
         return _db_unavailable_response()
+
+    rate_error = _check_rate_limit("rate_limit_auth", max_requests=10, window=60)
+    if rate_error:
+        return rate_error
 
     data = request.get_json(silent=True) or {}
     username = _validate_username(data.get("username"))
@@ -193,6 +212,10 @@ def register_user():
 def login_user():
     if users is None:
         return _db_unavailable_response()
+
+    rate_error = _check_rate_limit("rate_limit_auth", max_requests=10, window=60)
+    if rate_error:
+        return rate_error
 
     data = request.get_json(silent=True) or {}
     username = _validate_username(data.get("username"))
@@ -456,6 +479,93 @@ def redirect_url(short_code):
         return jsonify({"error": "URL not found"}), 404
 
 
+@app.route('/api', methods=['GET'])
+def api_docs():
+    return jsonify({
+        "name": "Sniplink API",
+        "version": "1.0.0",
+        "endpoints": [
+            {
+                "route": "/api/register",
+                "method": "POST",
+                "auth": False,
+                "rate_limited": True,
+                "description": "Create a new account",
+                "request_body": {"username": "string", "password": "string"},
+                "response": {"token": "string", "username": "string"},
+                "errors": [400, 409, 429, 503],
+            },
+            {
+                "route": "/api/login",
+                "method": "POST",
+                "auth": False,
+                "rate_limited": True,
+                "description": "Login and receive an auth token",
+                "request_body": {"username": "string", "password": "string"},
+                "response": {"token": "string", "username": "string"},
+                "errors": [400, 401, 429, 503],
+            },
+            {
+                "route": "/api/shorten",
+                "method": "POST",
+                "auth": True,
+                "rate_limited": True,
+                "description": "Create a short URL",
+                "request_body": {"url": "string (required)", "custom_alias": "string (optional)", "expiry": "ISO datetime (optional)"},
+                "response": {"short_url": "string"},
+                "errors": [400, 401, 429, 503],
+            },
+            {
+                "route": "/api/urls",
+                "method": "GET",
+                "auth": True,
+                "rate_limited": False,
+                "description": "List the authenticated user's short URLs, sorted by clicks descending",
+                "query_params": {"limit": "int (default 100, max 500)", "skip": "int (default 0)"},
+                "response": {"items": "array", "limit": "int", "skip": "int"},
+                "errors": [401, 503],
+            },
+            {
+                "route": "/api/urls/<short_code>",
+                "method": "PUT",
+                "auth": True,
+                "rate_limited": False,
+                "description": "Update a short URL's destination, alias, or expiry",
+                "request_body": {"url": "string (optional)", "custom_alias": "string (optional)", "expiry": "ISO datetime or null (optional)"},
+                "response": {"short_url": "string"},
+                "errors": [400, 401, 404, 503],
+            },
+            {
+                "route": "/api/urls/<short_code>",
+                "method": "DELETE",
+                "auth": True,
+                "rate_limited": False,
+                "description": "Delete a short URL and its click data",
+                "response": {"message": "Deleted"},
+                "errors": [401, 404, 503],
+            },
+            {
+                "route": "/api/stats/<short_code>",
+                "method": "GET",
+                "auth": False,
+                "rate_limited": False,
+                "description": "Get public click statistics for any short URL",
+                "response": {"short_code": "string", "original_url": "string", "clicks": "int", "expiry": "ISO datetime or null"},
+                "errors": [404],
+            },
+            {
+                "route": "/<short_code>",
+                "method": "GET",
+                "auth": False,
+                "rate_limited": False,
+                "description": "Redirect to the original URL (cached via Redis, TTL 1 hour)",
+                "response": "302 redirect or 410 if expired",
+                "errors": [404, 410],
+            },
+        ],
+    })
+
+
 @app.route('/', methods=['GET'])
 @app.route('/login', methods=['GET'])
 @app.route('/register', methods=['GET'])
@@ -465,7 +575,7 @@ def serve_frontend_root():
         return send_from_directory(os.path.join(PROJECT_ROOT, "dist"), "index.html")
     return jsonify({
         "message": "Frontend not built yet. Run `npm run build` to create dist/.",
-        "api": ["/api/shorten", "/api/stats/<short_code>", "/api/urls"],
+        "api_docs": "/api",
     })
 
 
