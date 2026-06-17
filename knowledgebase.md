@@ -90,7 +90,7 @@
 
 ## 4. Backend Deep Dive
 
-### 4.1 File: `backend/app.py` (592 lines)
+### 4.1 File: `backend/app.py` (621 lines)
 
 #### Auth System
 - **Token:** URLSafeTimedSerializer (itsdangerous) — not standard JWT, but a signed timed token
@@ -102,6 +102,7 @@
 
 | Method | Route | Auth | Rate-Limited | Description |
 |---|---|---|---|---|
+| GET | `/api/health` | No | No | Health check (MongoDB + Redis status) |
 | GET | `/api` | No | No | API documentation / endpoint listing |
 | POST | `/api/register` | No | Yes (10/min/IP) | Create account, returns token |
 | POST | `/api/login` | No | Yes (10/min/IP) | Login, returns token |
@@ -142,6 +143,12 @@ All rate limits gracefully degrade if Redis is unavailable (checks `redis_client
 - Optional ISO datetime string from frontend
 - If expiry is in the past, the redirect returns HTTP 410 (Gone)
 - Stored as datetime in MongoDB
+
+#### Health Checks
+- `GET /api/health` pings MongoDB (`admin.command("ping")`) and Redis (`redis_client.ping()`)
+- Returns `{"status": "healthy"|"degraded", "checks": {"mongodb": "up"|"down", "redis": "up"|"down"|"disabled"}}`
+- HTTP 200 if all services healthy, 503 if any dependency is down
+- Redis shows `"disabled"` if the client failed to connect at startup (graceful degradation)
 
 #### CORS
 - Configurable via `CORS_ORIGINS` env var (comma-separated or `*`)
@@ -412,7 +419,8 @@ npm run dev
 - Framework: Vite
 - Build: `npm run build`
 - Output: `dist/`
-- Env var: `VITE_API_BASE_URL=https://urlshortner-1xj7.onrender.com`
+- Env var (optional): `VITE_API_BASE_URL=https://urlshortner-1xj7.onrender.com`
+- `vercel.json` rewrites `/api/(.*)` to the Render backend, so API calls from the frontend domain are proxied automatically (no CORS issues even without the env var)
 
 ### Single-Service (Flask serves built frontend)
 - Run `npm run build` → `dist/` is created
