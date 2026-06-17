@@ -90,7 +90,7 @@
 
 ## 4. Backend Deep Dive
 
-### 4.1 File: `backend/app.py` (621 lines)
+### 4.1 File: `backend/app.py` (722 lines)
 
 #### Auth System
 - **Token:** URLSafeTimedSerializer (itsdangerous) — not standard JWT, but a signed timed token
@@ -111,7 +111,9 @@
 | PUT | `/api/urls/<code>` | Yes (Bearer) | No | Update URL, alias, or expiry |
 | DELETE | `/api/urls/<code>` | Yes (Bearer) | No | Delete a short URL |
 | GET | `/api/stats/<code>` | No | No | Get click stats for a short code |
+| GET | `/api/admin/stats` | Yes (Bearer) | No | Full system analysis (URLs, clicks, DB size, Redis, top URLs, uptime) |
 | GET | `/<short_code>` | No | No | Redirect to original URL |
+| GET | `/aa/admin` | No | No | Serve admin SPA page |
 | GET | `/`, `/login`, `/register` | No | No | Serve frontend or API info |
 | GET | `/assets/<path>` | No | No | Serve built frontend assets |
 
@@ -193,6 +195,7 @@ Sample document structure for export/backup:
 /           → Index (RequireAuth wrapper — redirects to /login if no token)
 /login      → Login
 /register   → Register
+/aa/admin   → Admin (RequireAuth wrapper)
 *           → NotFound
 ```
 
@@ -200,7 +203,7 @@ Sample document structure for export/backup:
 
 #### `Index.tsx` — Main Dashboard
 - Two-column grid layout: left panel (shorten form + analytics), right panel (links list)
-- Header with logo ("Sniplink"), ThemeToggle, Logout button
+- Header with logo ("Sniplink"), ThemeToggle, Admin button (navigates to `/aa/admin`), Logout button
 - URL shortener form (`ShortenForm`)
 - Result display with QR code (`ResultCard`)
 - Link analytics lookup (`StatsCard`)
@@ -221,6 +224,17 @@ Sample document structure for export/backup:
 
 #### `NotFound.tsx`
 - Simple 404 page with link back to `/`
+
+#### `Admin.tsx` — System Dashboard
+- Route: `/aa/admin` (static Flask route registered before `/<short_code>` to avoid catch-all intercept)
+- Fetches full system stats from `GET /api/admin/stats` on mount
+- Dark-themed dashboard with glassmorphism card design, gradient accents
+- **Stats grid** (8 cards): total URLs, total clicks, users, avg object size, DB size, index size, Redis keys, Redis hit rate
+- **Redis panel**: cache hit rate progress bar, memory usage, cached keys count
+- **System panel**: uptime (human-readable + seconds), requests served, started-at timestamp, authenticated user, document count
+- **Top URLs table**: ranked by clicks with short code, original URL, click count, creation date
+- Manual "Refresh" button reloads all stats; 401 auto-redirects to login
+- "Dashboard" button in header navigates back to `/`
 
 ### 5.3 Components
 
@@ -298,6 +312,40 @@ Sample document structure for export/backup:
 - `border-radius: 0.75rem` (12px)
 - Font: JetBrains Mono (coding/monospace font via Google Fonts), with fallback chain: Fira Code, Cascadia Code, Consolas, monospace
 
+### 5.8 Admin Page (`Admin.tsx`)
+
+The admin dashboard at `/aa/admin` provides real-time system analysis. It is implemented as:
+
+**Backend (`/api/admin/stats`):**
+- Returns JSON with five top-level blocks:
+  - `urls`: total count, sum of all clicks, expired count
+  - `users`: registered user count
+  - `database`: size in MB, collections, objects, avg object size (bytes), index size in MB — all from `db.command("dbstats")`
+  - `redis`: connected status, keys count, used memory, hits, misses, cache hit rate (keyspace_hits / (keyspace_hits + keyspace_misses))
+  - `top_urls`: top 10 URLs sorted by clicks descending, with short_code, original_url, clicks, created_at
+  - `system`: uptime (seconds + human-readable), total requests served (incremented via `@app.before_request`), started_at timestamp, authenticated user
+- Uses `_current_username()` for auth (401 if invalid/expired token)
+- All metrics are live — computed fresh on every request
+
+**Frontend:**
+- Route `/aa/admin` with `RequireAuth` wrapper (redirects to `/login` if no token)
+- Dark-theme dashboard with glassmorphism cards (`backdrop-blur-sm`, gradient overlays)
+- 8-card stats grid covering all available metrics
+- Redis panel with animated hit-rate progress bar
+- System panel with key-value rows
+- Top URLs table with numbered ranking, short code, original URL (truncated), click count, creation date
+- Manual "Refresh" button; "Dashboard" button to navigate back to `/`
+- Loading state uses shadcn `Skeleton` components; error state shows retry button
+- Auto-redirects to login on 401 (expired/tampered token)
+
+**Routing:**
+- Flask serves SPA `index.html` at `/aa/admin` via `serve_admin_spa()` route registered before `/<short_code>` to avoid catch-all intercept
+- React Router handles client-side rendering of the `Admin` component at `/aa/admin`
+- Vite dev proxies only `/api/*`; `/aa/admin` is handled by Vite's SPA fallback in development
+
+**`created_at` field:**
+- The `created_at` timestamp was added to URL documents on insert (`datetime.utcnow()`) to support the top URLs table in the admin dashboard. The field is populated via `$set` on creation and not updated thereafter.
+
 ---
 
 ## 6. Database Schema & Indexing Strategy
@@ -312,7 +360,8 @@ Sample document structure for export/backup:
   original_url: String,
   user_id: String (references users._id),
   expiry: DateTime (optional, nullable),
-  clicks: Number (default 0)
+  clicks: Number (default 0),
+  created_at: DateTime (UTC, set on insert)
 }
 ```
 
@@ -538,7 +587,7 @@ npm run dev
 
 34. **How does the `GET /api` documentation endpoint work and why did you add it?** — It returns a JSON object listing every endpoint with its method, auth requirement, rate limit status, request/response schema, and possible error codes. It serves as self-documenting API reference that stays in sync with the code, eliminating the need for a separate Swagger setup.
 
-35. **Why did you choose a self-documenting JSON endpoint over OpenAPI/Swagger?** — For a small API with 8 endpoints, a hand-written JSON response is simpler, requires zero additional dependencies, stays perfectly in sync with the code, and is easily consumed by both humans and automated tools. Swagger would be over-engineered for this scope.
+35. **Why did you choose a self-documenting JSON endpoint over OpenAPI/Swagger?** — For a small API with 10+ endpoints, a hand-written JSON response is simpler, requires zero additional dependencies, stays perfectly in sync with the code, and is easily consumed by both humans and automated tools. Swagger would be over-engineered for this scope.
 
 36. **Explain the database indexing strategy — why did you add a separate `short_code` unique index?** — The redirect endpoint (`GET /<short_code>`) is the most performance-critical path: every visit does an exact lookup on `short_code`. Without an explicit index, MongoDB would need a full collection scan. The unique constraint also acts as a safety net against accidental code collisions.
 

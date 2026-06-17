@@ -96,3 +96,41 @@ export const deleteUrl = async (shortCode: string) => {
   const response = await API.delete(`/api/urls/${shortCode}`);
   return response.data;
 };
+
+export interface AdminStats {
+  urls: { total: number; total_clicks: number; expired: number };
+  users: { total: number };
+  database: {
+    size_mb: number;
+    collections: number;
+    objects: number;
+    avg_object_size_bytes: number;
+    index_size_mb: number;
+  };
+  redis: {
+    connected: boolean;
+    configured?: boolean;
+    keys?: number;
+    used_memory_bytes?: number;
+    hits?: number;
+    misses?: number;
+    hit_rate?: number;
+  };
+  top_urls: Array<{
+    short_code: string;
+    original_url: string;
+    clicks: number;
+    created_at: string | null;
+  }>;
+  system: {
+    uptime_seconds: number;
+    uptime_human: string;
+    requests_served: number;
+    started_at: string;
+  };
+}
+
+export const getAdminStats = async () => {
+  const response = await API.get<AdminStats>("/api/admin/stats");
+  return response.data;
+};

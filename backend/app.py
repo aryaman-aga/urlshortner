@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, redirect, send_from_directory
 import random
 import string
+import time
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 import redis
@@ -46,6 +47,9 @@ AUTH_SECRET = os.getenv("AUTH_SECRET") or os.getenv("SECRET_KEY") or "dev-secret
 AUTH_TOKEN_MAX_AGE_SECONDS = int(os.getenv("AUTH_TOKEN_MAX_AGE_SECONDS", "604800"))  # 7 days
 _token_serializer = URLSafeTimedSerializer(AUTH_SECRET, salt="sniplink-auth")
 
+APP_START_TIME = time.time()
+_request_counter = 0
+
 redis_host = os.getenv("REDIS_HOST", "localhost")
 redis_port = int(os.getenv("REDIS_PORT", "6379"))
 redis_db = int(os.getenv("REDIS_DB", "0"))
@@ -84,6 +88,12 @@ except Exception:
     db = None
     collection = None
     users = None
+
+
+@app.before_request
+def _increment_request_counter():
+    global _request_counter
+    _request_counter += 1
 
 
 def _db_unavailable_response():
@@ -310,7 +320,8 @@ def shorten_url():
             "original_url": original_url,
             "user_id": user_id,
             "expiry": expiry,
-            "clicks": 0
+            "clicks": 0,
+            "created_at": datetime.utcnow(),
         })
 
     base = _public_base_url()
@@ -434,6 +445,15 @@ def delete_url(short_code):
 
 
 # API 2: Redirect
+@app.route('/aa/admin', methods=['GET'])
+@app.route('/aa/admin/', methods=['GET'])
+def serve_admin_spa():
+    dist_index = os.path.join(PROJECT_ROOT, "dist", "index.html")
+    if os.path.exists(dist_index):
+        return send_from_directory(os.path.join(PROJECT_ROOT, "dist"), "index.html")
+    return jsonify({"error": "Frontend not built"}), 503
+
+
 @app.route('/<short_code>')
 def redirect_url(short_code):
     if collection is None:
@@ -477,6 +497,87 @@ def redirect_url(short_code):
 
     else:
         return jsonify({"error": "URL not found"}), 404
+
+
+@app.route('/api/admin/stats', methods=['GET'])
+def admin_stats():
+    if collection is None or db is None:
+        return jsonify({"error": "Database unavailable"}), 503
+
+    username = _current_username()
+    if not username:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    urls_total = collection.count_documents({})
+    urls_expired = collection.count_documents({"expiry": {"$lt": datetime.utcnow()}}) if urls_total else 0
+    users_total = users.count_documents({}) if users else 0
+
+    clicks_pipe = list(collection.aggregate([
+        {"$group": {"_id": None, "total": {"$sum": "$clicks"}}}
+    ]))
+    clicks_total = clicks_pipe[0]["total"] if clicks_pipe else 0
+
+    top_urls = list(collection.find(
+        {},
+        {"short_code": 1, "original_url": 1, "clicks": 1, "created_at": 1, "_id": 0}
+    ).sort("clicks", -1).limit(10))
+
+    db_stats = db.command("dbstats")
+
+    redis_data = {}
+    if redis_client:
+        try:
+            info = redis_client.info()
+            redis_data = {
+                "connected": True,
+                "keys": redis_client.dbsize(),
+                "used_memory_bytes": info.get("used_memory", 0),
+                "hits": info.get("keyspace_hits", 0),
+                "misses": info.get("keyspace_misses", 0),
+                "hit_rate": round(
+                    info.get("keyspace_hits", 0) / max(
+                        info.get("keyspace_hits", 0) + info.get("keyspace_misses", 0), 1
+                    ), 4
+                ),
+            }
+        except Exception:
+            redis_data = {"connected": False}
+    else:
+        redis_data = {"connected": False, "configured": False}
+
+    uptime_seconds = int(time.time() - APP_START_TIME)
+
+    return jsonify({
+        "urls": {
+            "total": urls_total,
+            "total_clicks": clicks_total,
+            "expired": urls_expired,
+        },
+        "users": {"total": users_total},
+        "database": {
+            "size_mb": round(db_stats.get("dataSize", 0) / (1024 * 1024), 2),
+            "collections": db_stats.get("collections", 0),
+            "objects": db_stats.get("objects", 0),
+            "avg_object_size_bytes": round(db_stats.get("avgObjSize", 0)),
+            "index_size_mb": round(db_stats.get("totalIndexSize", 0) / (1024 * 1024), 2),
+        },
+        "redis": redis_data,
+        "top_urls": [
+            {
+                "short_code": u["short_code"],
+                "original_url": u["original_url"],
+                "clicks": u.get("clicks", 0),
+                "created_at": _iso(u.get("created_at")) if u.get("created_at") else None,
+            }
+            for u in top_urls
+        ],
+        "system": {
+            "uptime_seconds": uptime_seconds,
+            "uptime_human": f"{uptime_seconds // 86400}d {(uptime_seconds % 86400) // 3600}h {(uptime_seconds % 3600) // 60}m",
+            "requests_served": _request_counter,
+            "started_at": datetime.fromtimestamp(APP_START_TIME).isoformat(),
+        },
+    })
 
 
 @app.route('/api/health', methods=['GET'])
@@ -590,6 +691,24 @@ def api_docs():
                 "description": "Redirect to the original URL (cached via Redis, TTL 1 hour)",
                 "response": "302 redirect or 410 if expired",
                 "errors": [404, 410],
+            },
+            {
+                "route": "/api/admin/stats",
+                "method": "GET",
+                "auth": True,
+                "rate_limited": False,
+                "description": "Full system analysis: URLs, clicks, users, DB size, Redis stats, top URLs, uptime",
+                "response": {"urls": "object", "users": "object", "database": "object", "redis": "object", "top_urls": "array", "system": "object"},
+                "errors": [401, 503],
+            },
+            {
+                "route": "/api/health",
+                "method": "GET",
+                "auth": False,
+                "rate_limited": False,
+                "description": "Health check — pings MongoDB and Redis, returns healthy/degraded status",
+                "response": {"status": "healthy|degraded", "checks": {"mongodb": "up|down", "redis": "up|down|disabled"}},
+                "errors": [],
             },
         ],
     })
