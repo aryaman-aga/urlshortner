@@ -1,99 +1,92 @@
-# URL Shortener Project
+# Sniplink — URL Shortener
 
-Clean full-stack layout with:
-- React + Vite frontend
-- Flask backend API
-- MongoDB for storage
-- Redis for cache/rate limiting
+Full-stack URL shortener with React + Vite frontend, Flask backend API, MongoDB storage, and Redis caching/rate limiting.
 
 ## Folder Structure
 
 ```
-backend/
-	app.py                  # Main Flask backend
-	requirements.txt        # Backend Python dependencies
-	data/
-		urls.json             # Sample/exported URL documents
-
-src/                      # Frontend source (React)
-public/                   # Frontend static files
-tests/e2e/                # Playwright config and fixture
-
-archive/
-	package-copy.json       # Old package backup
-
-app.py                    # Root compatibility launcher for backend
-requirements.txt          # Includes backend/requirements.txt
-vite.config.ts            # Frontend dev/build config
+├── backend/
+│   ├── app.py                  # Flask API
+│   ├── logging_config.py       # Structured JSON logging
+│   ├── requirements.txt        # Python dependencies
+│   ├── requirements-dev.txt    # Test dependencies
+│   ├── pytest.ini              # Pytest config
+│   ├── tests/                  # Backend unit tests
+│   └── data/                   # Sample URL documents
+├── frontend/
+│   ├── src/                    # React source
+│   ├── public/                 # Static assets
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tailwind.config.ts
+│   └── tests/e2e/              # Playwright E2E tests
+├── vercel.json                 # Vercel deployment config
+├── knowledgebase.md            # Full system documentation
+└── .gitignore
 ```
 
 ## Run In Development
 
-1. Backend
+### Backend
 
-```
-source .venv/bin/activate
+```bash
+cd backend
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python app.py
+python app.py          # Flask on :5000
 ```
 
-2. Frontend
+### Frontend
 
-```
+```bash
+cd frontend
 npm install
-npm run dev
+npm run dev            # Vite on :8080
+```
+
+### Run Tests
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+python -m pytest -v   # 25 tests (auth, health, shorten, redirect, stats)
 ```
 
 ## Environment
-
-Copy and edit:
 
 ```
 cp .env.example .env
 ```
 
-Useful variables:
-- `PORT`
-- `MONGO_URI`
-- `REDIS_HOST`
-- `SHORT_BASE_URL`
-- `AUTH_SECRET` (required for login tokens)
+Key variables: `MONGO_URI`, `REDIS_HOST`, `AUTH_SECRET`, `SHORT_BASE_URL`.
 
-## Auth (Username + Password)
+## API Endpoints
 
-This project now supports a simple login system:
+| Method | Route | Auth | Description |
+|--------|-------|------|-------------|
+| POST | `/api/register` | No | Create account |
+| POST | `/api/login` | No | Login |
+| POST | `/api/shorten` | Bearer | Create short URL |
+| GET | `/api/urls` | Bearer | List user's URLs |
+| PUT | `/api/urls/<code>` | Bearer | Update URL |
+| DELETE | `/api/urls/<code>` | Bearer | Delete URL |
+| GET | `/api/stats/<code>` | No | Click stats |
+| GET | `/api/admin/stats` | Bearer | System analytics |
+| GET | `/health` | No | Health check |
+| GET | `/metrics` | No | In-memory counters |
+| GET | `/<short_code>` | No | Redirect |
 
-- Register: `POST /api/register` with `{ "username": "...", "password": "..." }`
-- Login: `POST /api/login` with `{ "username": "...", "password": "..." }`
+## Deploy
 
-The frontend stores a Bearer token and automatically sends it on:
+### Frontend — Vercel
 
-- `POST /api/shorten` (protected)
-- `GET /api/urls` (protected)
+1. Push to GitHub
+2. In Vercel Dashboard → Project Settings → **Root Directory**: set to `frontend/`
+3. Build command: `npm run build`
+4. Output: `dist/`
+5. Env var: `VITE_API_BASE_URL=https://urlshortner-1xj7.onrender.com`
 
-These stay public:
+### Backend — Render
 
-- `GET /api/stats/<short_code>`
-- `GET /<short_code>` (redirect)
-
-## Build Frontend
-
-```
-npm run build
-```
-
-Flask serves built files from `dist/` at `/` when you want a single Render service.
-
-## Deploy Frontend to Vercel
-
-The frontend is a Vite app and can be deployed to Vercel as a static site.
-
-**Build settings (in Vercel dashboard):**
-- Framework preset: Vite
-- Build command: `npm run build`
-- Output directory: `dist`
-
-**Environment variables (Vercel → Project → Settings → Environment Variables):**
-- `VITE_API_BASE_URL=https://urlshortner-1xj7.onrender.com`
-
-After setting the env var, trigger a new deployment. The Vercel-hosted frontend will call the Flask API on Render via the `/api/...` routes.
+- Start command: `gunicorn app:app`
+- Set env vars: `MONGO_URI`, `REDIS_HOST`, `AUTH_SECRET`, `SHORT_BASE_URL`
