@@ -1,7 +1,16 @@
-from flask import Flask, request, jsonify, redirect, send_from_directory
+"""Flask URL shortener API backend.
+
+Exposes REST endpoints for user registration/login, authenticated URL shortening,
+public click statistics, and short-code redirects. Persists users and URL mappings in
+MongoDB; uses Redis for per-IP rate limiting and redirect URL caching.
+"""
+
+from flask import Flask, request, jsonify, redirect, send_from_directory, g
 import random
 import string
 import time
+import uuid
+import logging
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 import redis
@@ -9,6 +18,8 @@ from datetime import datetime, timedelta
 import os
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.security import generate_password_hash, check_password_hash
+
+from logging_config import log_event, setup_logging
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -27,6 +38,7 @@ except Exception:
 
 
 app = Flask(__name__)
+logger = setup_logging(os.getenv("LOG_LEVEL", "INFO"))
 
 def _parse_cors_origins(value: str):
     value = (value or "").strip()
@@ -49,6 +61,8 @@ _token_serializer = URLSafeTimedSerializer(AUTH_SECRET, salt="sniplink-auth")
 
 APP_START_TIME = time.time()
 _request_counter = 0
+_shorten_counter = 0
+_redirect_counter = 0
 
 redis_host = os.getenv("REDIS_HOST", "localhost")
 redis_port = int(os.getenv("REDIS_PORT", "6379"))
@@ -91,9 +105,54 @@ except Exception:
 
 
 @app.before_request
-def _increment_request_counter():
+def _init_request_context():
+    """Assign a per-request ID, start timer, and increment request metrics."""
     global _request_counter
     _request_counter += 1
+    g.request_id = str(uuid.uuid4())
+    g._request_start_time = time.perf_counter()
+
+
+@app.after_request
+def _log_request(response):
+    """Emit a structured JSON log line for every completed HTTP request."""
+    start = getattr(g, "_request_start_time", None)
+    duration_ms = (
+        round((time.perf_counter() - start) * 1000, 2) if start is not None else None
+    )
+    log_event(
+        logger,
+        logging.INFO,
+        "request completed",
+        event="http_request",
+        method=request.method,
+        path=request.path,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+    )
+    return response
+
+
+def _ping_mongodb() -> str:
+    """Return ``up`` or ``down`` based on a lightweight MongoDB ping."""
+    if client is None:
+        return "down"
+    try:
+        client.admin.command("ping")
+        return "up"
+    except Exception:
+        return "down"
+
+
+def _ping_redis() -> str:
+    """Return ``up`` or ``down`` based on a lightweight Redis ping."""
+    if redis_client is None:
+        return "down"
+    try:
+        redis_client.ping()
+        return "up"
+    except Exception:
+        return "down"
 
 
 def _db_unavailable_response():
@@ -131,10 +190,26 @@ def _public_base_url() -> str:
 
 
 def _create_auth_token(username: str) -> str:
+    """Sign a timed auth token embedding the username.
+
+    Args:
+        username: Authenticated username to embed in the token payload.
+
+    Returns:
+        URL-safe signed token string valid for AUTH_TOKEN_MAX_AGE_SECONDS.
+    """
     return _token_serializer.dumps({"u": username})
 
 
 def _verify_auth_token(token: str) -> str | None:
+    """Verify a signed auth token and extract the username.
+
+    Args:
+        token: Bearer token from the Authorization header.
+
+    Returns:
+        Username string if the token is valid and unexpired; otherwise None.
+    """
     try:
         data = _token_serializer.loads(token, max_age=AUTH_TOKEN_MAX_AGE_SECONDS)
     except (SignatureExpired, BadSignature):
@@ -170,11 +245,31 @@ def _require_auth_username():
 
 
 def _check_rate_limit(prefix: str = "rate_limit", max_requests: int = 10, window: int = 60):
+    """Enforce a per-IP request count limit using Redis.
+
+    Args:
+        prefix: Redis key prefix (e.g. ``rate_limit_auth`` for auth endpoints).
+        max_requests: Maximum allowed requests within the window before rejecting.
+        window: Sliding window length in seconds for the Redis key TTL.
+
+    Returns:
+        A Flask error response tuple (JSON, 429) when over limit; otherwise None.
+        Skips enforcement entirely when Redis is unavailable.
+    """
     user_ip = request.remote_addr
     key = f"{prefix}:{user_ip}"
     if redis_client:
         count = redis_client.get(key)
+        # Reject once the counter exceeds the allowed maximum for this window.
         if count and int(count) > max_requests:
+            log_event(
+                logger,
+                logging.WARNING,
+                "rate limit exceeded",
+                event="rate_limit_rejected",
+                prefix=prefix,
+                path=request.path,
+            )
             return jsonify({"error": "Too many requests"}), 429
         redis_client.incr(key)
         redis_client.expire(key, window)
@@ -182,6 +277,14 @@ def _check_rate_limit(prefix: str = "rate_limit", max_requests: int = 10, window
 
 
 def _validate_username(username: str) -> str | None:
+    """Normalize and validate a username from request input.
+
+    Args:
+        username: Raw username value from the JSON body.
+
+    Returns:
+        Stripped username if non-empty and at most 64 characters; otherwise None.
+    """
     username = (username or "").strip()
     if not username:
         return None
@@ -192,6 +295,22 @@ def _validate_username(username: str) -> str | None:
 
 @app.route("/api/register", methods=["POST"])
 def register_user():
+    """Create a new user account and return an auth token.
+
+    Request body (JSON):
+        username (str, required): Unique username (max 64 chars, used as MongoDB _id).
+        password (str, required): Plain-text password (hashed before storage).
+
+    Returns:
+        200 JSON ``{"token": str, "username": str}`` on success.
+
+    Error responses:
+        400: Missing or invalid username/password.
+        409: Username already taken (duplicate _id).
+        429: Rate limit exceeded (10 requests/min per IP).
+        500: Unexpected failure inserting the user document.
+        503: MongoDB unavailable.
+    """
     if users is None:
         return _db_unavailable_response()
 
@@ -206,6 +325,7 @@ def register_user():
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
+    # Store only a Werkzeug password hash; never persist the plain-text password.
     password_hash = generate_password_hash(password)
     try:
         users.insert_one({"_id": username, "password_hash": password_hash})
@@ -220,6 +340,21 @@ def register_user():
 
 @app.route("/api/login", methods=["POST"])
 def login_user():
+    """Authenticate a user and return an auth token.
+
+    Request body (JSON):
+        username (str, required): Registered username.
+        password (str, required): Account password.
+
+    Returns:
+        200 JSON ``{"token": str, "username": str}`` on success.
+
+    Error responses:
+        400: Missing or invalid username/password.
+        401: Unknown username or incorrect password.
+        429: Rate limit exceeded (10 requests/min per IP).
+        503: MongoDB unavailable.
+    """
     if users is None:
         return _db_unavailable_response()
 
@@ -236,14 +371,29 @@ def login_user():
 
     user = users.find_one({"_id": username})
     password_hash = (user or {}).get("password_hash")
+    # Use constant-time hash comparison; same 401 for missing user and bad password.
     if not password_hash or not check_password_hash(password_hash, password):
+        log_event(
+            logger,
+            logging.WARNING,
+            "login failed",
+            event="login_failed",
+            username=username,
+        )
         return jsonify({"error": "Invalid username or password"}), 401
 
     token = _create_auth_token(username)
     return jsonify({"token": token, "username": username})
 
-# Generate short code
 def generate_short_code(length=6):
+    """Generate a random alphanumeric short code.
+
+    Args:
+        length: Number of characters in the code (default 6).
+
+    Returns:
+        Random string drawn from ASCII letters and digits.
+    """
     characters = string.ascii_letters + string.digits
     return ''.join(random.choice(characters) for _ in range(length))
 
@@ -258,10 +408,27 @@ def base62_encode(num):
     return encoded or "0"
 
 
-# API 1: Shorten URL
 @app.route('/shorten', methods=['POST'])
 @app.route('/api/shorten', methods=['POST'])
 def shorten_url():
+    """Create or reuse a short URL for the authenticated user.
+
+    Requires ``Authorization: Bearer <token>`` header.
+
+    Request body (JSON):
+        url (str, required): Original URL to shorten.
+        custom_alias (str, optional): User-chosen short code instead of a random one.
+        expiry (str, optional): ISO-8601 datetime after which the link expires.
+
+    Returns:
+        200 JSON ``{"short_url": str}`` with the full public short URL.
+
+    Error responses:
+        400: Missing url, or custom alias already taken.
+        401: Missing or invalid auth token.
+        429: Rate limit exceeded (5 requests/min per IP).
+        503: MongoDB unavailable.
+    """
     if collection is None:
         return _db_unavailable_response()
 
@@ -278,10 +445,19 @@ def shorten_url():
     if redis_client:
         requests_count = redis_client.get(key)
         if requests_count and int(requests_count) > 5:
+            log_event(
+                logger,
+                logging.WARNING,
+                "rate limit exceeded",
+                event="rate_limit_rejected",
+                prefix="rate_limit",
+                path=request.path,
+            )
             return jsonify({"error": "Too many requests"}), 429
 
+        # Track per-IP shorten attempts with a 60-second TTL window.
         redis_client.incr(key)
-        redis_client.expire(key, 60)  # 1 minute window
+        redis_client.expire(key, 60)
 
     original_url = data.get("url")
     custom_alias = data.get("custom_alias")
@@ -304,13 +480,16 @@ def shorten_url():
 
     if existing:
         short_code = existing["short_code"]
+        created = False
     else:
+        created = True
         if custom_alias:
             # Check if alias already exists
             if collection.find_one({"short_code": custom_alias}):
                 return jsonify({"error": "Custom alias already taken"}), 400
             short_code = custom_alias
         else:
+            # Generate a random code and retry on the rare collision with an existing one.
             short_code = generate_short_code()
             while collection.find_one({"short_code": short_code}):
                 short_code = generate_short_code()
@@ -323,16 +502,40 @@ def shorten_url():
             "clicks": 0,
             "created_at": datetime.utcnow(),
         })
+        global _shorten_counter
+        _shorten_counter += 1
 
     base = _public_base_url()
     short_url = f"{base}/{short_code}"
 
+    log_event(
+        logger,
+        logging.INFO,
+        "url shortened",
+        event="shorten_success",
+        username=username,
+        short_code=short_code,
+        newly_created=created,
+    )
+
     return jsonify({"short_url": short_url})
 
-# API 3: Analytics (click stats)
 @app.route('/stats/<short_code>', methods=['GET'])
 @app.route('/api/stats/<short_code>', methods=['GET'])
 def get_stats(short_code):
+    """Return public click statistics for a short code.
+
+    Path params:
+        short_code (str): The short code to look up.
+
+    Returns:
+        200 JSON with ``short_code``, ``original_url``, ``clicks``, and ``expiry``
+        (ISO string or null).
+
+    Error responses:
+        404: No URL document exists for the given short code.
+        503: MongoDB unavailable.
+    """
     if collection is None:
         return _db_unavailable_response()
 
@@ -444,7 +647,37 @@ def delete_url(short_code):
     return jsonify({"message": "Deleted"}), 200
 
 
-# API 2: Redirect
+@app.route('/health', methods=['GET'])
+def deployment_health():
+    """Lightweight public health check for uptime monitors and deploy hooks.
+
+    Returns:
+        200 when MongoDB and Redis both respond to ping.
+        503 when any dependency is unreachable.
+    """
+    mongodb_status = _ping_mongodb()
+    redis_status = _ping_redis()
+    all_ok = mongodb_status == "up" and redis_status == "up"
+    http_code = 200 if all_ok else 503
+    return jsonify({
+        "status": "ok" if all_ok else "degraded",
+        "mongodb": mongodb_status,
+        "redis": redis_status,
+        "uptime_seconds": int(time.time() - APP_START_TIME),
+    }), http_code
+
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    """Expose simple in-memory counters since process start (public, no auth)."""
+    return jsonify({
+        "total_requests": _request_counter,
+        "total_redirects": _redirect_counter,
+        "total_shortens": _shorten_counter,
+        "uptime_seconds": int(time.time() - APP_START_TIME),
+    })
+
+
 @app.route('/aa/admin', methods=['GET'])
 @app.route('/aa/admin/', methods=['GET'])
 def serve_admin_spa():
@@ -456,41 +689,68 @@ def serve_admin_spa():
 
 @app.route('/<short_code>')
 def redirect_url(short_code):
+    """Redirect a short code to its original URL and record a click.
+
+    Public endpoint; no authentication required.
+
+    Path params:
+        short_code (str): The short code from the URL path.
+
+    Returns:
+        302 redirect to the original URL on success.
+
+    Error responses:
+        404: Short code not found in MongoDB.
+        410: Link has passed its expiry datetime.
+        503: MongoDB unavailable.
+    """
+    global _redirect_counter
     if collection is None:
         return _db_unavailable_response()
 
-    
-    # Step 1: Check Redis cache
     entry = collection.find_one({"short_code": short_code})
 
-# Expiry check first
+    # Reject expired links before serving from cache or DB.
     if entry and entry.get("expiry") and entry["expiry"] < datetime.utcnow():
         return jsonify({"error": "Link expired"}), 410
 
-# Then Redis
     if redis_client:
         cached_url = redis_client.get(short_code)
         if cached_url:
-            # Increment clicks even on cache hit
+            # Cache hit: still increment clicks in MongoDB for accurate stats.
             collection.update_one(
                 {"short_code": short_code},
                 {"$inc": {"clicks": 1}}
             )
+            _redirect_counter += 1
+            log_event(
+                logger,
+                logging.INFO,
+                "redirect cache hit",
+                event="redirect_cache_hit",
+                short_code=short_code,
+            )
             return redirect(cached_url.decode('utf-8'))
-
-    # Cache miss — fall back to DB
 
     if entry:
         original_url = entry["original_url"]
 
-        # Cache with TTL (1 hour)
+        # Populate Redis on cache miss; entries expire after one hour.
         if redis_client:
             redis_client.set(short_code, original_url, ex=3600)
 
-        # Increment clicks
         collection.update_one(
             {"short_code": short_code},
             {"$inc": {"clicks": 1}}
+        )
+
+        _redirect_counter += 1
+        log_event(
+            logger,
+            logging.INFO,
+            "redirect cache miss",
+            event="redirect_cache_miss",
+            short_code=short_code,
         )
 
         return redirect(original_url)
@@ -516,7 +776,14 @@ def admin_stats():
         if urls_total == 10000:
             urls_total = collection.estimated_document_count()
     except Exception as e:
-        app.logger.warning("admin_stats count failed: %s %s", type(e).__name__, str(e)[:200])
+        logger.warning(
+            "admin_stats count failed",
+            extra={
+                "event": "admin_stats_error",
+                "error_type": type(e).__name__,
+                "error": str(e)[:200],
+            },
+        )
     try:
         if urls_total:
             expired = list(collection.find({"expiry": {"$lt": datetime.utcnow()}}, {"_id": 1}).limit(10000))
