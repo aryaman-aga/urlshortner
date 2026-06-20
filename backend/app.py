@@ -70,8 +70,19 @@ _redirect_counter = 0
 redis_host = os.getenv("REDIS_HOST", "localhost")
 redis_port = int(os.getenv("REDIS_PORT", "6379"))
 redis_db = int(os.getenv("REDIS_DB", "0"))
+redis_password = os.getenv("REDIS_PASSWORD") or None
+redis_ssl = os.getenv("REDIS_SSL", "false").lower() == "true"
 try:
-    redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
+    redis_client = redis.Redis(
+        host=redis_host,
+        port=redis_port,
+        password=redis_password,
+        db=redis_db,
+        ssl=redis_ssl,
+        ssl_cert_reqs=None,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
     redis_client.ping()
 except Exception:
     redis_client = None
