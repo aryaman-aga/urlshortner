@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "backend:start": "python3 app.py",
-    "backend:start:venv": "./.venv/bin/python app.py",
+    "backend:start": "python3 ../backend/app.py",
+    "backend:start:venv": "../.venv/bin/python ../backend/app.py",
     "dev:full": "npm run backend:start & npm run dev",
     "build": "vite build",
     "build:dev": "vite build --mode development",

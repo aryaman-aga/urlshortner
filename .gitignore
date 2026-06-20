@@ -11,3 +11,4 @@ dist/
 .coverage
 .workspace/
 .git.broken
+knowledgebase.pdf
