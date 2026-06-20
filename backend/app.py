@@ -19,7 +19,10 @@ import os
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from logging_config import log_event, setup_logging
+try:
+    from logging_config import log_event, setup_logging
+except ModuleNotFoundError:
+    from backend.logging_config import log_event, setup_logging
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
