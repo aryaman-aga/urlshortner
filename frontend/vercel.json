@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api",
+      "destination": "https://urlshortner-1xj7.onrender.com/api"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "https://urlshortner-1xj7.onrender.com/api/$1"
     },
